@@ -69,8 +69,7 @@ python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --f
 ### Rules
 | Field | Type | Default | Description |
 |------|------|---------|-------------|
-| `max_day_in_row` | integer | `5` | Upper bound for consecutive DAY assignments. |
-| `max_night_in_row` | integer | `5` | Upper bound for consecutive NIGHT assignments. |
+| `max_shifts_in_row` | integer | `5` | Upper bound for consecutive working shifts (DAY or NIGHT). |
 | `max_days_off` | integer | `2` | Max OFF days per person per week. |
 | `min_days_off` | integer | `1` | Min OFF days per person per week. |
 | `no_day_after_night` | boolean | `true` | Prevent DAY immediately after NIGHT. |
@@ -102,8 +101,7 @@ python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --f
 		}
 	],
 	"rules": {
-		"max_day_in_row": 5,
-		"max_night_in_row": 5,
+		"max_shifts_in_row": 5,
 		"max_days_off": 2,
 		"min_days_off": 1,
 		"no_day_after_night": true,

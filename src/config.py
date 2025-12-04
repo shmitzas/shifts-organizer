@@ -23,8 +23,7 @@ def parse_config(path: str) -> Config:
         ))
     rules_raw = raw.get("rules", {})
     rules = RulesConfig(
-        max_day_in_row=int(rules_raw.get("max_day_in_row", 5)),
-        max_night_in_row=int(rules_raw.get("max_night_in_row", 5)),
+        max_shifts_in_row=int(rules_raw.get("max_shifts_in_row", 5)),
         max_days_off=int(rules_raw.get("max_days_off", 2)),
         min_days_off=int(rules_raw.get("min_days_off", 1)),
         no_day_after_night=bool(rules_raw.get("no_day_after_night", True)),
@@ -57,8 +56,8 @@ def validate_config(cfg: Config) -> None:
         raise ValueError("Days off must be non-negative")
     if r.min_days_off > r.max_days_off:
         raise ValueError("min_days_off cannot exceed max_days_off")
-    if r.max_day_in_row <= 0 or r.max_night_in_row <= 0:
-        raise ValueError("max_day_in_row and max_night_in_row must be positive")
+    if r.max_shifts_in_row <= 0:
+        raise ValueError("max_shifts_in_row must be positive")
     if r.min_days_off_after_night_streak < 0:
         raise ValueError("min_days_off_after_night_streak must be >= 0")
 

@@ -20,8 +20,7 @@
     }
   ],
   "rules": {
-    "max_day_in_row": 5,
-    "max_night_in_row": 5,
+    "max_shifts_in_row": 5,
     "max_days_off": 2,
     "min_days_off": 1,
     "no_day_after_night": true,

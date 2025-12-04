@@ -26,8 +26,7 @@ class ShiftConfig:
 
 @dataclasses.dataclass
 class RulesConfig:
-    max_day_in_row: int
-    max_night_in_row: int
+    max_shifts_in_row: int
     max_days_off: int
     min_days_off: int
     no_day_after_night: bool
@@ -47,19 +46,19 @@ class PersonState:
     streak_len: int = 0
     last_assignment: Optional[str] = None
     night_cooldown_remaining: int = 0
+    working_streak_len: int = 0  # consecutive DAYS or NIGHTS regardless of type
 
     def can_assign(self, assign: str, rules: RulesConfig) -> bool:
         # If in mandatory cooldown after NIGHT streak, only OFF is allowed
         if self.night_cooldown_remaining > 0 and assign != OFF:
             return False
-        if assign == DAY:
-            if self.streak_type == DAY and self.streak_len >= rules.max_day_in_row:
+        # Unified max consecutive working shifts (DAY or NIGHT)
+        if assign in (DAY, NIGHT):
+            if self.working_streak_len >= rules.max_shifts_in_row:
                 return False
-            if rules.no_day_after_night and self.last_assignment == NIGHT:
-                return False
-        if assign == NIGHT:
-            if self.streak_type == NIGHT and self.streak_len >= rules.max_night_in_row:
-                return False
+        # Cross-type immediate constraints
+        if assign == DAY and rules.no_day_after_night and self.last_assignment == NIGHT:
+            return False
         return True
 
     def apply(self, assign: str, rules: Optional[RulesConfig] = None) -> None:
@@ -69,6 +68,11 @@ class PersonState:
             self.streak_type = assign
             self.streak_len = 1
         self.last_assignment = assign
+        # Maintain unified working streak length across DAY/NIGHT
+        if assign in (DAY, NIGHT):
+            self.working_streak_len += 1
+        else:
+            self.working_streak_len = 0
         # Manage cooldown: when transitioning from NIGHT to OFF, start cooldown
         if rules is not None:
             if self.last_assignment == OFF:
