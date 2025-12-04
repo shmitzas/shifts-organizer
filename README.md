@@ -46,6 +46,7 @@ python scheduler.py --config config.json --start 2025-01-06 --weeks 12 --out sch
 | `no_day_after_night` | boolean | `true` | Prevent DAY immediately after NIGHT. |
 | `friday_shift2_priority_names` | array(string) | `[]` | Prefer these names on Fridays in Shift 2. |
 | `wednesday_day_overfill` | boolean | `true` | Enable Wednesday day overfill behavior. |
+| `min_days_off_after_night_streak` | integer | `0` | Require at least N OFF days immediately after finishing a NIGHT streak. |
 
 ### Example `config.json`
 ```json
@@ -77,7 +78,8 @@ python scheduler.py --config config.json --start 2025-01-06 --weeks 12 --out sch
 		"min_days_off": 1,
 		"no_day_after_night": true,
 		"friday_shift2_priority_names": ["Dina"],
-		"wednesday_day_overfill": true
+		"wednesday_day_overfill": true,
+		"min_days_off_after_night_streak": 2
 	}
 }
 ```

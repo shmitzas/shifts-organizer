@@ -52,7 +52,7 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
 
             day_members: List[str] = rank_candidates(DAY)[:day_count]
             for p in day_members:
-                person_states[p].apply(DAY)
+                person_states[p].apply(DAY, rules)
 
             night_candidates = [p for p in people if p not in day_members]
 
@@ -69,11 +69,18 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
 
             night_members = rank_night(night_candidates)[:night_count]
             for p in night_members:
-                person_states[p].apply(NIGHT)
+                person_states[p].apply(NIGHT, rules)
 
             off_members = [p for p in people if p not in day_members and p not in night_members]
+            # If a person was previously on NIGHT and now switches to OFF, start cooldown
             for p in off_members:
-                person_states[p].apply(OFF)
+                st = person_states[p]
+                # Detect transition from NIGHT to OFF at the start of OFF streak (streak_len will be set in apply)
+                if st.last_assignment == NIGHT and st.night_cooldown_remaining == 0 and rules.min_days_off_after_night_streak > 0:
+                    # Initialize cooldown; apply() will decrement per OFF day
+                    st.night_cooldown_remaining = rules.min_days_off_after_night_streak
+            for p in off_members:
+                person_states[p].apply(OFF, rules)
                 off_counter[p] += 1
 
             days.append(DayPlan(

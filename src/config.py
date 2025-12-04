@@ -30,6 +30,7 @@ def parse_config(path: str) -> Config:
         no_day_after_night=bool(rules_raw.get("no_day_after_night", True)),
         friday_shift2_priority_names=list(rules_raw.get("friday_shift2_priority_names", [])),
         wednesday_day_overfill=bool(rules_raw.get("wednesday_day_overfill", True)),
+        min_days_off_after_night_streak=int(rules_raw.get("min_days_off_after_night_streak", 0)),
     )
 
     cfg = Config(shifts=shifts, rules=rules)
@@ -58,6 +59,8 @@ def validate_config(cfg: Config) -> None:
         raise ValueError("min_days_off cannot exceed max_days_off")
     if r.max_day_in_row <= 0 or r.max_night_in_row <= 0:
         raise ValueError("max_day_in_row and max_night_in_row must be positive")
+    if r.min_days_off_after_night_streak < 0:
+        raise ValueError("min_days_off_after_night_streak must be >= 0")
 
 
 def _validate_time(t: str) -> None:
