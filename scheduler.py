@@ -29,6 +29,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--config", required=True, help="Path to configuration JSON")
     ap.add_argument("--start", required=True, help="Start date (ISO, e.g., 2025-01-06 Monday)")
     ap.add_argument("--weeks", type=int, required=False, help="Total number of weeks to emit; defaults to repeat cycle length")
+    ap.add_argument("--max-weeks", type=int, required=False, default=10, help="Maximum weeks to search for a valid repeating pattern (default 10)")
     ap.add_argument("--out", required=True, help="Output file path (.csv or .xlsx)")
     ap.add_argument("--format", choices=["csv", "xlsx"], help="Output format; defaults by file extension")
     return ap.parse_args(argv)
@@ -48,7 +49,7 @@ def main(argv=None) -> int:
     shift_patterns: Dict[str, List[WeekPlan]] = {}
     pattern_lengths: List[int] = []
     for s in cfg.shifts:
-        patterns = find_smallest_valid_pattern(s, cfg.rules, max_try_weeks=52)
+        patterns = find_smallest_valid_pattern(s, cfg.rules, max_try_weeks=args.max_weeks)
         shift_patterns[s.name] = patterns
         pattern_lengths.append(len(patterns))
         print(f"Shift '{s.name}': repeating every {len(patterns)} weeks with {len(s.people)} members")

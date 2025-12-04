@@ -22,7 +22,11 @@ class ShiftConfig:
     day_shift: TimeRange
     night_shift: TimeRange
     wednesday_day_overfill_count: int
-    prefer_two_or_more_in_shift: bool
+    # Staffing bounds
+    min_day_staff: int
+    max_day_staff: int
+    min_night_staff: int
+    max_night_staff: int
 
 @dataclasses.dataclass
 class RulesConfig:
@@ -33,6 +37,10 @@ class RulesConfig:
     friday_shift2_priority_names: List[str]
     wednesday_day_overfill: bool
     min_days_off_after_night_streak: int
+    # New configurable targets/behaviors
+    target_weekly_hours_min: int = 40
+    target_weekly_hours_max: int = 48
+    enable_auto_adjust: bool = True
 
 @dataclasses.dataclass
 class Config:
@@ -47,6 +55,7 @@ class PersonState:
     last_assignment: Optional[str] = None
     night_cooldown_remaining: int = 0
     working_streak_len: int = 0  # consecutive DAYS or NIGHTS regardless of type
+    previous_assignment: Optional[str] = None  # Track previous state for transition detection
 
     def can_assign(self, assign: str, rules: RulesConfig) -> bool:
         # If in mandatory cooldown after NIGHT streak, only OFF is allowed
@@ -62,33 +71,33 @@ class PersonState:
         return True
 
     def apply(self, assign: str, rules: Optional[RulesConfig] = None) -> None:
+        # Store previous before updating
+        self.previous_assignment = self.last_assignment
+        
+        # Update streak tracking
         if self.streak_type == assign:
             self.streak_len += 1
         else:
             self.streak_type = assign
             self.streak_len = 1
+        
         self.last_assignment = assign
+        
         # Maintain unified working streak length across DAY/NIGHT
         if assign in (DAY, NIGHT):
             self.working_streak_len += 1
         else:
             self.working_streak_len = 0
-        # Manage cooldown: when transitioning from NIGHT to OFF, start cooldown
+        
+        # Cooldown management with proper transition detection
         if rules is not None:
-            if self.last_assignment == OFF:
-                # If previous streak was NIGHT and we just started OFF, initialize cooldown if not already
-                if self.night_cooldown_remaining == 0 and self.streak_len == 1 and self.streak_type == OFF and self.last_assignment:
-                    # Check previous assignment type via last_assignment before overwrite; we already set last_assignment=OFF
-                    pass
-            # Decrement cooldown when OFF
+            # Detect NIGHT → OFF transition
+            if assign == OFF and self.previous_assignment == NIGHT and self.night_cooldown_remaining == 0:
+                self.night_cooldown_remaining = rules.min_days_off_after_night_streak
+            
+            # Decrement cooldown on OFF days
             if assign == OFF and self.night_cooldown_remaining > 0:
                 self.night_cooldown_remaining -= 1
-            # If assigning NIGHT, reset cooldown
-            if assign == NIGHT:
-                # Night assignment continues/starts a streak; cooldown will be set when OFF begins below
-                pass
-            # If we transitioned from NIGHT to OFF (detect using previous assignment), start cooldown
-            # We can't read previous assignment now; callers should set cooldown when starting OFF after NIGHT.
 
 @dataclasses.dataclass
 class DayPlan:

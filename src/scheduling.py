@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 from typing import List, Dict, Tuple
+from copy import deepcopy
 from .models import (
     WEEKDAYS, DAY, NIGHT, OFF,
     ShiftConfig, RulesConfig, PersonState,
@@ -14,94 +15,121 @@ def compute_min_pattern_weeks(people_count: int, rules: RulesConfig) -> int:
     # Heuristic lower bound
     return 2
 
+def _is_feasible(shift: ShiftConfig, rules: RulesConfig) -> bool:
+    """
+    Quick feasibility check:
+    - Daily minimum staffing implies weekly staffing S.
+    - Average OFF per person = 7 - S / people.
+    - Must satisfy min/max OFF bounds on average.
+    """
+    people_count = len(shift.people)
+    if people_count <= 0:
+        return False
+    min_daily_total = shift.min_day_staff + shift.min_night_staff
+    if min_daily_total > people_count:
+        return False
+    S = 7 * min_daily_total
+    avg_off = 7 - (S / people_count)
+    return (avg_off >= rules.min_days_off) and (avg_off <= rules.max_days_off)
+
+def _relax_optional_prefs(shift: ShiftConfig, rules: RulesConfig) -> Tuple[ShiftConfig, RulesConfig]:
+    """
+    Relax optional preferences when infeasible:
+    - Disable Wednesday overfill
+    - Clear Friday priority names
+    """
+    s2 = deepcopy(shift)
+    r2 = deepcopy(rules)
+    s2.wednesday_day_overfill_count = 0
+    r2.wednesday_day_overfill = False
+    r2.friday_shift2_priority_names = []
+    return s2, r2
+
 
 def _total_daily_staff(people_count: int, rules: RulesConfig) -> int:
     """
-    Choose total staffed headcount (DAY+NIGHT) per day so that average OFF days
-    per person stays within [min_days_off, max_days_off].
-
-    Heuristic: target the midpoint OFF per week, then convert to staff.
-    total_staff_per_day = people_count - target_off_avg
-    Bound to [1, people_count].
+    Choose total staffed headcount (DAY+NIGHT) per day.
+    Goal: average ~40h/week per person. Favor fuller staffing within bounds.
+    Heuristic: aim near shift maxes while not exceeding available people.
     """
-    target_off_avg = max(rules.min_days_off, min(rules.max_days_off, (rules.min_days_off + rules.max_days_off) // 2))
-    total_staff = max(1, min(people_count, people_count - target_off_avg))
-    return total_staff
+    # Prefer fuller coverage: cap by people_count, but aim to use as many slots as max bounds allow.
+    # Note: the exact split between DAY/NIGHT happens later respecting min/max per type.
+    return max(1, min(people_count, people_count))
 
 
 def target_daily_staff_counts(shift: ShiftConfig, rules: RulesConfig, weekday_index: int) -> Tuple[int, int]:
     """
-    Decide DAY and NIGHT staffing counts for the given weekday.
-    - Keep both >= prefer_min (1 or 2)
-    - Apply Wednesday day overfill by moving capacity from NIGHT to DAY
-    - Keep total equal to computed daily staff
+    Decide DAY and NIGHT staffing counts using min/max bounds from ShiftConfig,
+    keeping total <= available people and near the daily total heuristic.
+    Apply Wednesday day overfill (bounded by max_day_staff).
     """
     people_count = len(shift.people)
     total_staff = _total_daily_staff(people_count, rules)
 
-    prefer_min = 2 if shift.prefer_two_or_more_in_shift else 1
-    # Start with equal split
-    day_count = max(prefer_min, total_staff // 2)
-    night_count = max(prefer_min, total_staff - day_count)
+    # Start from mins
+    day_count = shift.min_day_staff
+    night_count = shift.min_night_staff
 
-    # If totals exceed, adjust
-    while day_count + night_count > total_staff:
-        if night_count > day_count:
-            night_count -= 1
-        else:
-            day_count -= 1
+    # Allocate remaining capacity up to maxes, preferring balance
+    # Allocate remaining capacity up to max bounds; since total_staff==people_count,
+    # this favors fuller daily staffing to increase weekly hours
+    remaining = max(0, total_staff - (day_count + night_count))
+    while remaining > 0 and (day_count < shift.max_day_staff or night_count < shift.max_night_staff):
+        if day_count <= night_count and day_count < shift.max_day_staff:
+            day_count += 1
+        elif night_count < shift.max_night_staff:
+            night_count += 1
+        remaining -= 1
 
-    # Wednesday day overfill: shift headcount from night to day when possible
-    if weekday_index == 2 and shift.wednesday_day_overfill_count > 0:
-        desired_day = max(day_count, shift.wednesday_day_overfill_count)
-        move = max(0, min(desired_day - day_count, night_count - prefer_min))
+    # Wednesday day overfill: only move from night if we have capacity and won't violate minimums
+    if (rules.wednesday_day_overfill and weekday_index == 2 and 
+        shift.wednesday_day_overfill_count > day_count):
+        desired_day = min(shift.wednesday_day_overfill_count, shift.max_day_staff)
+        # Only move from night if we can maintain night minimums
+        available_to_move = max(0, night_count - shift.min_night_staff)
+        move = min(desired_day - day_count, available_to_move)
         day_count += move
         night_count -= move
 
-    # Ensure we don't request more people than available
+    # Ensure total doesn’t exceed available people
     total = day_count + night_count
+    # Safeguard: ensure at least one person scheduled (not all OFF)
+    if total == 0 and people_count > 0:
+        # Prefer DAY if within bounds
+        if shift.max_day_staff > 0:
+            day_count = 1
+        else:
+            night_count = 1
+        total = day_count + night_count
     if total > people_count:
         overflow = total - people_count
-        # Trim night first, then day
-        trim_night = min(overflow, max(0, night_count - prefer_min))
-        night_count -= trim_night
-        overflow -= trim_night
-        if overflow:
-            day_count = max(prefer_min, day_count - overflow)
+        while overflow > 0 and (day_count > shift.min_day_staff or night_count > shift.min_night_staff):
+            if night_count >= day_count and night_count > shift.min_night_staff:
+                night_count -= 1
+            elif day_count > shift.min_day_staff:
+                day_count -= 1
+            overflow -= 1
 
     return day_count, night_count
 
 
 def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks: int) -> List[WeekPlan]:
+    # If infeasible under current optional prefs, relax them
+    if not _is_feasible(shift, rules):
+        shift, rules = _relax_optional_prefs(shift, rules)
     people = list(shift.people)
     person_states: Dict[str, PersonState] = {p: PersonState(name=p) for p in people}
     week_patterns: List[WeekPlan] = []
 
-    # Helper to compute hours for a single assignment type for this shift
-    def _hours_for(assign_type: str) -> float:
-        def parse_hhmm(s: str) -> Tuple[int, int]:
-            h, m = s.split(":")
-            return int(h), int(m)
-        if assign_type == DAY:
-            sh = shift.day_shift
-        else:
-            sh = shift.night_shift
-        h1, m1 = parse_hhmm(sh.start)
-        h2, m2 = parse_hhmm(sh.end)
-        t1 = dt.timedelta(hours=h1, minutes=m1)
-        t2 = dt.timedelta(hours=h2, minutes=m2)
-        dur = t2 - t1
-        if dur.total_seconds() <= 0:
-            # Overnight wrap
-            dur = (dt.timedelta(days=1) - t1) + t2
-        return dur.total_seconds() / 3600.0
-
-    day_hours = _hours_for(DAY)
-    night_hours = _hours_for(NIGHT)
+    # Compute hours using the shared helper function
+    day_hours = _hours_for_range(shift.day_shift)
+    night_hours = _hours_for_range(shift.night_shift)
 
     for w in range(pattern_weeks):
         days: List[DayPlan] = []
         off_counter: Dict[str, int] = {p: 0 for p in people}
+        # Track per-person hours within the current week to improve fairness
+        week_hours: Dict[str, float] = {p: 0.0 for p in people}
 
         for d in range(7):
             day_count, night_count = target_daily_staff_counts(shift, rules, d)
@@ -115,15 +143,26 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                     st = person_states[p]
                     if not st.can_assign(assign_type, rules):
                         continue
+                    # Respect weekly max hours cap: skip if adding today would exceed max
+                    if assign_type == DAY and hasattr(rules, "target_weekly_hours_max"):
+                        if week_hours[p] + day_hours > float(rules.target_weekly_hours_max):
+                            continue
+                    if assign_type == NIGHT and hasattr(rules, "target_weekly_hours_max"):
+                        if week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
+                            continue
                     penalty = st.streak_len if st.streak_type == assign_type else 0
                     bonus = -2 if (is_friday and p in priority_names) else 0
-                    scored.append((p, penalty + (0 if st.last_assignment != assign_type else 0.5) - bonus))
+                    # Fairness: prefer those with fewer hours so far this week
+                    fairness = week_hours[p] / 10.0  # normalize to keep impact modest
+                    scored.append((p, penalty + (0 if st.last_assignment != assign_type else 0.5) - bonus + fairness))
                 scored.sort(key=lambda x: (x[1], x[0]))
                 return [p for p, _ in scored]
 
             day_members: List[str] = rank_candidates(DAY)[:day_count]
             for p in day_members:
                 person_states[p].apply(DAY, rules)
+                # accumulate hours for fairness
+                week_hours[p] += day_hours
 
             night_candidates = [p for p in people if p not in day_members]
 
@@ -133,23 +172,145 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                     st = person_states[p]
                     if not st.can_assign(NIGHT, rules):
                         continue
+                    if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
+                        continue
                     penalty = st.streak_len if st.streak_type == NIGHT else 0
-                    scored.append((p, penalty + (0 if st.last_assignment != NIGHT else 0.5)))
+                    fairness = week_hours[p] / 10.0
+                    scored.append((p, penalty + (0 if st.last_assignment != NIGHT else 0.5) + fairness))
                 scored.sort(key=lambda x: (x[1], x[0]))
                 return [p for p, _ in scored]
 
             night_members = rank_night(night_candidates)[:night_count]
             for p in night_members:
                 person_states[p].apply(NIGHT, rules)
+                week_hours[p] += night_hours
+
+            # Helper to try assign OFF people to a type up to a needed count
+            def _assign_from_off(assign_type: str, needed: int) -> int:
+                off_pool = [x for x in people if x not in day_members and x not in night_members]
+                for p in off_pool:
+                    if needed <= 0:
+                        break
+                    st = person_states[p]
+                    if st.can_assign(assign_type, rules):
+                        # Respect max-hours cap when backfilling
+                        if assign_type == DAY and hasattr(rules, "target_weekly_hours_max") and week_hours[p] + day_hours > float(rules.target_weekly_hours_max):
+                            continue
+                        if assign_type == NIGHT and hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
+                            continue
+                        person_states[p].apply(assign_type, rules)
+                        if assign_type == DAY:
+                            day_members.append(p)
+                            week_hours[p] += day_hours
+                        else:
+                            night_members.append(p)
+                            week_hours[p] += night_hours
+                        needed -= 1
+                return needed
+
+            # Backfill NIGHT to meet computed target if underfilled due to constraints
+            if len(night_members) < night_count:
+                needed = night_count - len(night_members)
+                # First try OFF members
+                needed = _assign_from_off(NIGHT, needed)
+                # If still short, try moving from DAY if above min_day_staff
+                if needed > 0:
+                    movable = [p for p in day_members if len(day_members) > shift.min_day_staff]
+                    for p in movable:
+                        if needed <= 0:
+                            break
+                        st = person_states[p]
+                        # Revert DAY and apply NIGHT if allowed
+                        # Simple approach: if can assign NIGHT, switch
+                        if st.can_assign(NIGHT, rules):
+                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
+                                continue
+                            # Remove DAY assignment effect by resetting last assignment; re-applying below
+                            # For simplicity, we won't undo streak counters here; instead prefer future assignment fairness
+                            day_members.remove(p)
+                            person_states[p].apply(NIGHT, rules)
+                            night_members.append(p)
+                            week_hours[p] += night_hours
+                            needed -= 1
+
+            # Ensure daily minimums: fill up to min_day_staff and min_night_staff
+            # First ensure NIGHT minimums (to fix Sat/Sun gaps)
+            if len(night_members) < shift.min_night_staff:
+                needed_n = shift.min_night_staff - len(night_members)
+                needed_n = _assign_from_off(NIGHT, needed_n)
+                if needed_n > 0:
+                    # Move from DAY if possible
+                    movable = [p for p in day_members if len(day_members) > shift.min_day_staff]
+                    for p in movable:
+                        if needed_n <= 0:
+                            break
+                        st = person_states[p]
+                        if st.can_assign(NIGHT, rules):
+                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
+                                continue
+                            day_members.remove(p)
+                            person_states[p].apply(NIGHT, rules)
+                            night_members.append(p)
+                            week_hours[p] += night_hours
+                            needed_n -= 1
+                if needed_n > 0:
+                    # Debug: show why we can't meet minimum
+                    eligible_count = sum(1 for p in people if person_states[p].can_assign(NIGHT, rules))
+                    in_cooldown = sum(1 for p in people if person_states[p].night_cooldown_remaining > 0)
+                    print(f"WARNING {WEEKDAYS[d]}: Cannot meet min_night_staff={shift.min_night_staff} (short by {needed_n}). Eligible: {eligible_count}, In cooldown: {in_cooldown}")
+                    # Continue with what we have rather than failing
+                    # This allows the pattern to complete even if some days are understaffed
+
+            # Then ensure DAY minimums
+            if len(day_members) < shift.min_day_staff:
+                needed_d = shift.min_day_staff - len(day_members)
+                needed_d = _assign_from_off(DAY, needed_d)
+                if needed_d > 0:
+                    # Move from NIGHT if possible
+                    movable = [p for p in night_members if len(night_members) > shift.min_night_staff]
+                    for p in movable:
+                        if needed_d <= 0:
+                            break
+                        st = person_states[p]
+                        if st.can_assign(DAY, rules):
+                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + day_hours > float(rules.target_weekly_hours_max):
+                                continue
+                            night_members.remove(p)
+                            person_states[p].apply(DAY, rules)
+                            day_members.append(p)
+                            week_hours[p] += day_hours
+                            needed_d -= 1
+                if needed_d > 0:
+                    # Could not meet minimum DAY staffing; warn but continue
+                    print(f"WARNING {WEEKDAYS[d]}: Cannot meet min_day_staff={shift.min_day_staff} (short by {needed_d})")
+                    # Continue with what we have rather than failing
 
             off_members = [p for p in people if p not in day_members and p not in night_members]
-            # If a person was previously on NIGHT and now switches to OFF, start cooldown
-            for p in off_members:
-                st = person_states[p]
-                # Detect transition from NIGHT to OFF at the start of OFF streak (streak_len will be set in apply)
-                if st.last_assignment == NIGHT and st.night_cooldown_remaining == 0 and rules.min_days_off_after_night_streak > 0:
-                    # Initialize cooldown; apply() will decrement per OFF day
-                    st.night_cooldown_remaining = rules.min_days_off_after_night_streak
+            # Ensure at least one assigned this day for the team; if none, try to move one OFF to DAY or NIGHT
+            if not day_members and not night_members and off_members:
+                # Try assign someone to DAY first if possible
+                fallback_assigned = False
+                for p in off_members:
+                    st = person_states[p]
+                    if st.can_assign(DAY, rules):
+                        person_states[p].apply(DAY, rules)
+                        day_members.append(p)
+                        off_members.remove(p)
+                        fallback_assigned = True
+                        week_hours[p] += day_hours
+                        break
+                if not fallback_assigned:
+                    for p in off_members:
+                        st = person_states[p]
+                        if st.can_assign(NIGHT, rules):
+                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
+                                continue
+                            person_states[p].apply(NIGHT, rules)
+                            night_members.append(p)
+                            off_members.remove(p)
+                            week_hours[p] += night_hours
+                            break
+            # Apply OFF assignment (cooldown is now handled automatically in PersonState.apply)
             for p in off_members:
                 person_states[p].apply(OFF, rules)
                 off_counter[p] += 1
@@ -171,17 +332,99 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
 
     return week_patterns
 
+def _pattern_meets_mins(pattern: List[WeekPlan], shift: ShiftConfig) -> bool:
+    """
+    Check if pattern meets minimum staffing requirements.
+    More lenient: allow occasional understaffing if constraints prevent meeting mins.
+    """
+    violations = 0
+    total_days = len(pattern) * 7
+    
+    for week in pattern:
+        for day in week.days:
+            if len(day.assignments[DAY]) < shift.min_day_staff:
+                violations += 1
+            if len(day.assignments[NIGHT]) < shift.min_night_staff:
+                violations += 1
+    
+    # Allow up to 20% of days to be understaffed due to constraint conflicts
+    tolerance = int(total_days * 0.2)
+    return violations <= tolerance
 
-def find_smallest_valid_pattern(shift: ShiftConfig, rules: RulesConfig, max_try_weeks: int = 52) -> List[WeekPlan]:
+def _compute_avg_week_hours(pattern: List[WeekPlan], shift: ShiftConfig) -> Dict[str, float]:
+    # average hours per person across the pattern (weeks)
+    day_h = _hours_for_range(shift.day_shift)
+    night_h = _hours_for_range(shift.night_shift)
+    totals: Dict[str, float] = {p: 0.0 for p in shift.people}
+    weeks = len(pattern)
+    for w in pattern:
+        for d in w.days:
+            for p in d.assignments[DAY]:
+                totals[p] += day_h
+            for p in d.assignments[NIGHT]:
+                totals[p] += night_h
+    return {p: (totals[p] / max(weeks, 1)) for p in shift.people}
+
+def _hours_for_range(tr: TimeRange) -> float:
+    h1, m1 = map(int, tr.start.split(":"))
+    h2, m2 = map(int, tr.end.split(":"))
+    t1 = dt.timedelta(hours=h1, minutes=m1)
+    t2 = dt.timedelta(hours=h2, minutes=m2)
+    dur = t2 - t1
+    if dur.total_seconds() <= 0:
+        dur = (dt.timedelta(days=1) - t1) + t2
+    return dur.total_seconds() / 3600.0
+
+def find_smallest_valid_pattern(shift: ShiftConfig, rules: RulesConfig, max_try_weeks: int = 104) -> List[WeekPlan]:
     start = compute_min_pattern_weeks(len(shift.people), rules)
+    last_err = None
     for w in range(start, max_try_weeks + 1):
         try:
-            return allocate_week_pattern(shift, rules, w)
-        except ValueError:
+            pat = allocate_week_pattern(shift, rules, w)
+            if _pattern_meets_mins(pat, shift):
+                return pat
+            else:
+                # Try longer cycle
+                continue
+        except ValueError as e:
+            last_err = e
             continue
-    raise RuntimeError(
-        f"Could not find a valid repeating pattern within {max_try_weeks} weeks for shift '{shift.name}'"
+    # If reached here, try dynamic adjustments to improve hours balance
+    # Clone rules and relax preferred options; adjust max_days_off downward to allow more work
+    adj_rules = RulesConfig(
+        max_shifts_in_row=rules.max_shifts_in_row,
+        max_days_off=rules.max_days_off,
+        min_days_off=rules.min_days_off,
+        no_day_after_night=rules.no_day_after_night,
+        friday_shift2_priority_names=[],
+        wednesday_day_overfill=False,
+        min_days_off_after_night_streak=rules.min_days_off_after_night_streak,
+        target_weekly_hours_min=rules.target_weekly_hours_min,
+        enable_auto_adjust=rules.enable_auto_adjust,
     )
+    # progressively reduce max_days_off toward min_days_off
+    for mdo in range(rules.max_days_off, rules.min_days_off - 1, -1):
+        adj_rules.max_days_off = mdo
+        for w in range(start, max_try_weeks + 1):
+            try:
+                pat = allocate_week_pattern(shift, adj_rules, w)
+                if not _pattern_meets_mins(pat, shift):
+                    continue
+                avg_hours = _compute_avg_week_hours(pat, shift)
+                # Accept if average >= configurable target
+                target = rules.target_weekly_hours_min if hasattr(rules, 'target_weekly_hours_min') else 30.0
+                if all(h >= float(target) for h in avg_hours.values()):
+                    print(f"Adjusted rules for '{shift.name}': max_days_off={mdo}, disabled Wednesday overfill and Friday priorities, target_weekly_hours_min={target}.")
+                    return pat
+                # Otherwise keep trying longer weeks
+            except ValueError:
+                continue
+    # As last resort, return a longest attempt even if below target; inform adjustments
+    pat = allocate_week_pattern(shift, adj_rules, max_try_weeks)
+    avg_hours = _compute_avg_week_hours(pat, shift)
+    target = rules.target_weekly_hours_min if hasattr(rules, 'target_weekly_hours_min') else 30.0
+    print(f"Adjusted rules for '{shift.name}' but could not reach {target}h avg for all. max_days_off={adj_rules.max_days_off}. Averages: " + ", ".join(f"{p}:{h:.1f}" for p,h in avg_hours.items()))
+    return pat
 
 
 def write_csv(out_path: str, start_date: dt.date, total_weeks: int, shift_patterns: Dict[str, List[WeekPlan]]) -> None:
@@ -212,8 +455,8 @@ def write_pivot_csv(out_path: str, total_weeks: int, shift_patterns: Dict[str, L
     week_headers: List[str] = []
     day_headers: List[str] = []
     for w in range(total_weeks):
-        week_headers.extend([f"Week {w+1}"] + ["" for _ in range(6)])
-        day_headers.extend(["M", "T", "W", "Th", "F", "S", "Su"])
+        week_headers.extend([f"Week {w+1}"] + ["" for _ in range(8)])
+        day_headers.extend(["M", "T", "W", "Th", "F", "S", "Su", "Hours", "Total"])
 
     rows: List[List[str]] = []
 
@@ -221,23 +464,88 @@ def write_pivot_csv(out_path: str, total_weeks: int, shift_patterns: Dict[str, L
     for shift in cfg.shifts:
         patterns = shift_patterns[shift.name]
 
+        def _country_code(name: str) -> str:
+            first = name.split()[0].lower()
+            return {
+                "lithuania": "LT",
+                "indonesia": "ID",
+            }.get(first, first[:2].upper())
+
+        def _short_time(t: str) -> str:
+            # Convert HH:MM to HH
+            return t.split(":")[0]
+
         def base_label(assign_type: str) -> str:
-            if assign_type == DAY:
-                return f"{shift.name} {assign_type}: {shift.day_shift.start}-{shift.day_shift.end} {shift.timezone}"
-            else:
-                return f"{shift.name} {assign_type}: {shift.night_shift.start}-{shift.night_shift.end} {shift.timezone}"
+            code = _country_code(shift.name)
+            shift_num = "S1" if assign_type == DAY else "S2"
+            time_range = f"{_short_time(shift.day_shift.start)}-{_short_time(shift.day_shift.end)}" if assign_type == DAY else f"{_short_time(shift.night_shift.start)}-{_short_time(shift.night_shift.end)}"
+            return f"{code} {shift_num}: {time_range}"
 
         # Emit one row per person per assignment type, showing only that person's presence for each day
+        # Helper: compute hours per assignment type
+        def _hours_for(assign_type: str) -> float:
+            def parse_hhmm(s: str):
+                h, m = s.split(":"); return int(h), int(m)
+            sh = shift.day_shift if assign_type == DAY else shift.night_shift
+            h1, m1 = parse_hhmm(sh.start)
+            h2, m2 = parse_hhmm(sh.end)
+            t1 = dt.timedelta(hours=h1, minutes=m1)
+            t2 = dt.timedelta(hours=h2, minutes=m2)
+            dur = t2 - t1
+            if dur.total_seconds() <= 0:
+                dur = (dt.timedelta(days=1) - t1) + t2
+            return dur.total_seconds() / 3600.0
+
         for assign_type in (DAY, NIGHT):
             for person in shift.people:
                 row: List[str] = []
+                total_hours_across_weeks = 0.0
                 for w in range(total_weeks):
                     week = patterns[w % len(patterns)]
+                    worked_days = 0
                     for d in range(7):
                         members = week.days[d].assignments[assign_type]
                         cell = person if person in members else ""
                         row.append(cell)
-                row.insert(0, f"{base_label(assign_type)} | {person}")
+                        if person in members:
+                            worked_days += 1
+                    # Append weekly hours column for this assign type
+                    hours = worked_days * _hours_for(assign_type)
+                    row.append(f"{hours:.1f}")
+                    total_hours_across_weeks += hours
+                    # Total column: only populate for DAY rows; leave blank for NIGHT rows
+                    if assign_type == DAY:
+                        combined = 0.0
+                        day_h = _hours_for(DAY)
+                        night_h = _hours_for(NIGHT)
+                        for d in range(7):
+                            if person in week.days[d].assignments[DAY]:
+                                combined += day_h
+                            if person in week.days[d].assignments[NIGHT]:
+                                combined += night_h
+                        row.append(f"{combined:.1f}")
+                    else:
+                        row.append("")
+                # Calculate average combined hours (DAY+NIGHT) per week across all weeks
+                # Only show in DAY rows
+                if assign_type == DAY:
+                    total_combined_hours = 0.0
+                    day_h = _hours_for(DAY)
+                    night_h = _hours_for(NIGHT)
+                    for w in range(total_weeks):
+                        week = patterns[w % len(patterns)]
+                        week_combined = 0.0
+                        for d in range(7):
+                            if person in week.days[d].assignments[DAY]:
+                                week_combined += day_h
+                            if person in week.days[d].assignments[NIGHT]:
+                                week_combined += night_h
+                        total_combined_hours += week_combined
+                    avg_hours = total_combined_hours / total_weeks if total_weeks > 0 else 0.0
+                    row.append(f"{avg_hours:.1f}")
+                else:
+                    row.append("")
+                row.insert(0, base_label(assign_type))
                 rows.append(row)
 
     # Write CSV
@@ -268,8 +576,12 @@ def write_pivot_xlsx(out_path: str, total_weeks: int, shift_patterns: Dict[str, 
     week_headers: List[str] = []
     day_headers: List[str] = []
     for w in range(total_weeks):
-        week_headers.extend([f"Week {w+1}"] + ["" for _ in range(6)])
-        day_headers.extend(["M", "T", "W", "Th", "F", "S", "Su"])
+        week_headers.extend([f"Week {w+1}"] + ["" for _ in range(8)])
+        day_headers.extend(["M", "T", "W", "Th", "F", "S", "Su", "Hours", "Total"])
+
+    # Add final Avg column
+    week_headers.append("")
+    day_headers.append("Avg")
 
     # Write headers
     ws.cell(row=1, column=1, value="Shift")
@@ -282,20 +594,62 @@ def write_pivot_xlsx(out_path: str, total_weeks: int, shift_patterns: Dict[str, 
     rows: List[Tuple[str, List[str]]] = []
     for shift in cfg.shifts:
         patterns = shift_patterns[shift.name]
+        def _country_code(name: str) -> str:
+            first = name.split()[0].lower()
+            return {
+                "lithuania": "LT",
+                "indonesia": "ID",
+            }.get(first, first[:2].upper())
+
+        def _short_time(t: str) -> str:
+            return t.split(":")[0]
+
         def base_label(assign_type: str) -> str:
-            if assign_type == DAY:
-                return f"{shift.name} {assign_type}: {shift.day_shift.start}-{shift.day_shift.end} {shift.timezone}"
-            else:
-                return f"{shift.name} {assign_type}: {shift.night_shift.start}-{shift.night_shift.end} {shift.timezone}"
+            code = _country_code(shift.name)
+            shift_num = "S1" if assign_type == DAY else "S2"
+            time_range = f"{_short_time(shift.day_shift.start)}-{_short_time(shift.day_shift.end)}" if assign_type == DAY else f"{_short_time(shift.night_shift.start)}-{_short_time(shift.night_shift.end)}"
+            return f"{code} {shift_num}: {time_range}"
+        def _hours_for(assign_type: str) -> float:
+            def parse_hhmm(s: str):
+                h, m = s.split(":"); return int(h), int(m)
+            sh = shift.day_shift if assign_type == DAY else shift.night_shift
+            h1, m1 = parse_hhmm(sh.start)
+            h2, m2 = parse_hhmm(sh.end)
+            t1 = dt.timedelta(hours=h1, minutes=m1)
+            t2 = dt.timedelta(hours=h2, minutes=m2)
+            dur = t2 - t1
+            if dur.total_seconds() <= 0:
+                dur = (dt.timedelta(days=1) - t1) + t2
+            return dur.total_seconds() / 3600.0
         for assign_type in (DAY, NIGHT):
             for person in shift.people:
                 cells: List[str] = []
                 for w in range(total_weeks):
                     week = patterns[w % len(patterns)]
+                    worked_days = 0
                     for d in range(7):
                         members = week.days[d].assignments[assign_type]
-                        cells.append(person if person in members else "")
-                rows.append((f"{base_label(assign_type)} | {person}", cells))
+                        val = person if person in members else ""
+                        cells.append(val)
+                        if person in members:
+                            worked_days += 1
+                    # weekly hours after each week block
+                    hours = worked_days * _hours_for(assign_type)
+                    cells.append(f"{hours:.1f}")
+                    # combined total only on DAY rows; NIGHT rows blank
+                    if assign_type == DAY:
+                        combined = 0.0
+                        day_h = _hours_for(DAY)
+                        night_h = _hours_for(NIGHT)
+                        for d in range(7):
+                            if person in week.days[d].assignments[DAY]:
+                                combined += day_h
+                            if person in week.days[d].assignments[NIGHT]:
+                                combined += night_h
+                        cells.append(f"{combined:.1f}")
+                    else:
+                        cells.append("")
+                rows.append((base_label(assign_type), cells))
 
     # Styling
     header_fill = PatternFill("solid", fgColor="DDDDDD")
@@ -327,29 +681,91 @@ def write_pivot_xlsx(out_path: str, total_weeks: int, shift_patterns: Dict[str, 
     # Write data rows with coloring per team/type
     row_idx = 3
     for shift_index, shift in enumerate(cfg.shifts):
+        patterns = shift_patterns[shift.name]
+        
+        def _country_code(name: str) -> str:
+            first = name.split()[0].lower()
+            return {
+                "lithuania": "LT",
+                "indonesia": "ID",
+            }.get(first, first[:2].upper())
+
+        def _short_time(t: str) -> str:
+            return t.split(":")[0]
+
         day_color, night_color = team_colors(shift_index)
         # For each type, for each person
         for assign_type in (DAY, NIGHT):
+            code = _country_code(shift.name)
+            shift_num = "S1" if assign_type == DAY else "S2"
+            time_range = f"{_short_time(shift.day_shift.start)}-{_short_time(shift.day_shift.end)}" if assign_type == DAY else f"{_short_time(shift.night_shift.start)}-{_short_time(shift.night_shift.end)}"
+            label = f"{code} {shift_num}: {time_range}"
+            
             color = day_color if assign_type == DAY else night_color
             fill = PatternFill("solid", fgColor=color)
             for person in shift.people:
-                # Retrieve corresponding data row
-                label = f"{shift.name} {assign_type}: {shift.day_shift.start}-{shift.day_shift.end} {shift.timezone}" if assign_type == DAY else f"{shift.name} {assign_type}: {shift.night_shift.start}-{shift.night_shift.end} {shift.timezone}"
-                # Find the tuple in rows (inefficient linear search but fine for small sizes)
-                # Alternatively we could generate inline, but keep simple
-                # We'll just write now instead of searching rows list
-                ws.cell(row=row_idx, column=1, value=f"{label} | {person}")
-                # fill cells
+                a_cell = ws.cell(row=row_idx, column=1, value=label)
+                a_cell.font = Font(bold=True)
+                # fill cells including weekly hours and combined totals
                 col = 2
+                total_hours_across_weeks = 0.0
                 for w in range(total_weeks):
                     week = shift_patterns[shift.name][w % len(shift_patterns[shift.name])]
+                    worked_days = 0
                     for d in range(7):
                         members = week.days[d].assignments[assign_type]
                         val = person if person in members else ""
                         cell = ws.cell(row=row_idx, column=col, value=val)
                         cell.border = border
                         cell.alignment = center
+                        if person in members:
+                            worked_days += 1
                         col += 1
+                    # Add weekly hours cell after each week block
+                    hours = worked_days * _hours_for(assign_type)
+                    total_hours_across_weeks += hours
+                    hcell = ws.cell(row=row_idx, column=col, value=f"{hours:.1f}")
+                    hcell.border = border
+                    hcell.alignment = center
+                    col += 1
+                    # Add combined TOTAL (DAY+NIGHT) after Hours - only for DAY rows
+                    if assign_type == DAY:
+                        combined = 0.0
+                        # compute shift hours
+                        day_h = _hours_for(DAY)
+                        night_h = _hours_for(NIGHT)
+                        for d in range(7):
+                            if person in week.days[d].assignments[DAY]:
+                                combined += day_h
+                            if person in week.days[d].assignments[NIGHT]:
+                                combined += night_h
+                        tcell = ws.cell(row=row_idx, column=col, value=f"{combined:.1f}")
+                    else:
+                        tcell = ws.cell(row=row_idx, column=col, value="")
+                    tcell.border = border
+                    tcell.alignment = center
+                    col += 1
+                # Add average combined hours (DAY+NIGHT) per week - only for DAY rows
+                if assign_type == DAY:
+                    total_combined_hours = 0.0
+                    day_h = _hours_for(DAY)
+                    night_h = _hours_for(NIGHT)
+                    for w in range(total_weeks):
+                        week = shift_patterns[shift.name][w % len(shift_patterns[shift.name])]
+                        week_combined = 0.0
+                        for d in range(7):
+                            if person in week.days[d].assignments[DAY]:
+                                week_combined += day_h
+                            if person in week.days[d].assignments[NIGHT]:
+                                week_combined += night_h
+                        total_combined_hours += week_combined
+                    avg_hours = total_combined_hours / total_weeks if total_weeks > 0 else 0.0
+                    avg_cell = ws.cell(row=row_idx, column=col, value=f"{avg_hours:.1f}")
+                else:
+                    avg_cell = ws.cell(row=row_idx, column=col, value="")
+                avg_cell.border = border
+                avg_cell.alignment = center
+                avg_cell.font = Font(bold=True)
                 # color full row
                 for c in range(1, 1 + 1 + len(week_headers)):
                     ws.cell(row=row_idx, column=c).fill = fill

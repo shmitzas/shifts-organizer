@@ -64,7 +64,10 @@ python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --f
 | `night_shift.start` | string `HH:MM` | `"17:00"` | Start time. |
 | `night_shift.end` | string `HH:MM` | `"02:00"` | End time. |
 | `wednesday_day_overfill_count` | integer | `2` | Extra DAY staff on Wednesday. |
-| `prefer_two_or_more_in_shift` | boolean | `true` | Target at least two people per shift. |
+| `min_day_staff` | integer | `1` | Minimum people on DAY shift. |
+| `max_day_staff` | integer | `people_count` | Maximum people on DAY shift. |
+| `min_night_staff` | integer | `1` | Minimum people on NIGHT shift. |
+| `max_night_staff` | integer | `people_count` | Maximum people on NIGHT shift. |
 
 ### Rules
 | Field | Type | Default | Description |
@@ -76,6 +79,8 @@ python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --f
 | `friday_shift2_priority_names` | array(string) | `[]` | Prefer these names on Fridays in Shift 2. |
 | `wednesday_day_overfill` | boolean | `true` | Enable Wednesday day overfill behavior. |
 | `min_days_off_after_night_streak` | integer | `0` | Require at least N OFF days immediately after finishing a NIGHT streak. |
+| `target_weekly_hours_min` | integer | `40` | Minimum average weekly hours per person to accept a pattern (auto-adjust may reduce OFF to reach target). |
+| `enable_auto_adjust` | boolean | `true` | Allow the scheduler to relax preferred options and reduce `max_days_off` if necessary to meet the target. |
 
 ### Example `config.json`
 ```json
@@ -88,7 +93,10 @@ python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --f
 			"day_shift": {"start": "09:00", "end": "18:00"},
 			"night_shift": {"start": "17:00", "end": "02:00"},
 			"wednesday_day_overfill_count": 2,
-			"prefer_two_or_more_in_shift": true
+			"min_day_staff": 2,
+			"max_day_staff": 3,
+			"min_night_staff": 2,
+			"max_night_staff": 3
 		},
 		{
 			"name": "Shift 2",
@@ -97,7 +105,10 @@ python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --f
 			"day_shift": {"start": "09:00", "end": "18:00"},
 			"night_shift": {"start": "17:00", "end": "02:00"},
 			"wednesday_day_overfill_count": 2,
-			"prefer_two_or_more_in_shift": true
+			"min_day_staff": 2,
+			"max_day_staff": 3,
+			"min_night_staff": 2,
+			"max_night_staff": 3
 		}
 	],
 	"rules": {
@@ -107,7 +118,9 @@ python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --f
 		"no_day_after_night": true,
 		"friday_shift2_priority_names": ["Dina"],
 		"wednesday_day_overfill": true,
-		"min_days_off_after_night_streak": 2
+		"min_days_off_after_night_streak": 2,
+		"target_weekly_hours_min": 40,
+		"enable_auto_adjust": true
 	}
 }
 ```

@@ -15,8 +15,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--config", required=True, help="Path to configuration JSON")
     ap.add_argument("--start", required=True, help="Start period in YYYY-MM (e.g., 2025-01)")
     ap.add_argument("--weeks", type=int, required=False, help="Total number of weeks to emit; defaults to repeat cycle length")
-    ap.add_argument("--out", required=True, help="Output file path (.csv or .xlsx)")
-    ap.add_argument("--format", choices=["csv", "xlsx"], help="Output format; defaults by file extension")
+    ap.add_argument("--max-weeks", type=int, required=False, default=10, help="Maximum weeks to search for a valid repeating pattern (default 10)")
+    ap.add_argument("--out", required=True, help="Output file path (extension will be determined by --format)")
+    ap.add_argument("--format", required=True, choices=["csv", "xlsx"], help="Output format")
     return ap.parse_args(argv)
 
 
@@ -36,7 +37,7 @@ def main(argv=None) -> int:
     shift_patterns: Dict[str, List[WeekPlan]] = {}
     pattern_lengths: List[int] = []
     for s in cfg.shifts:
-        patterns = find_smallest_valid_pattern(s, cfg.rules, max_try_weeks=52)
+        patterns = find_smallest_valid_pattern(s, cfg.rules, max_try_weeks=args.max_weeks)
         shift_patterns[s.name] = patterns
         pattern_lengths.append(len(patterns))
         print(f"Shift '{s.name}': repeating every {len(patterns)} weeks with {len(s.people)} members")
@@ -57,17 +58,23 @@ def main(argv=None) -> int:
     else:
         total_weeks = args.weeks
 
-    # Pivot output to match spreadsheet-like format
-    # Choose writer by format or extension
-    fmt = args.format
-    if not fmt:
-        fmt = "xlsx" if args.out.lower().endswith(".xlsx") else "csv"
+    # Add extension based on format if not present
+    import os
+    out_path = args.out
+    base, ext = os.path.splitext(out_path)
+    
+    # Remove extension if present and add the correct one based on format
+    if ext.lower() in ['.csv', '.xlsx']:
+        out_path = base
+    
+    out_path = f"{out_path}.{args.format}"
 
-    if fmt == "xlsx":
-        write_pivot_xlsx(args.out, total_weeks, shift_patterns, cfg)
+    # Pivot output to match spreadsheet-like format
+    if args.format == "xlsx":
+        write_pivot_xlsx(out_path, total_weeks, shift_patterns, cfg)
     else:
-        write_pivot_csv(args.out, total_weeks, shift_patterns, cfg)
-    print(f"Schedule written to {args.out}")
+        write_pivot_csv(out_path, total_weeks, shift_patterns, cfg)
+    print(f"Schedule written to {out_path}")
     return 0
 
 
