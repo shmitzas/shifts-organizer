@@ -9,16 +9,46 @@ Organize repeatable weekly shift patterns from a declarative configuration and e
 
 ## Quick Start
 1) Create a `config.json` in the project root (see schema below).
-2) Run the CLI to generate a schedule:
+2) Provide start period in `YYYY-MM` (first day auto-selected).
+3) Set up a virtual environment and install dependencies:
+
+On Linux/macOS:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+On Windows:
 
 ```pwsh
-python -m src.main --config config.json --start 2025-01-06 --weeks 12 --out schedule.csv
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+4) Run the CLI to generate a schedule:
+
+```pwsh
+# CSV pivot (plain, no styling)
+python -m src.main --config config.json --start 2025-01 --out schedule.csv
+
+# XLSX pivot with styling (colors, frozen headers) — requires openpyxl
+python -m src.main --config config.json --start 2025-01 --out schedule.xlsx --format xlsx
+
+# Weeks optional: defaults to the repeat cycle length (LCM of shift patterns)
+python -m src.main --config config.json --start 2025-01 --out schedule.xlsx
+
+# Specify weeks explicitly if desired
+python -m src.main --config config.json --start 2025-01 --weeks 12 --out schedule.xlsx --format xlsx
 ```
 
 Alternatively, the legacy entry point is still available:
 
 ```pwsh
-python scheduler.py --config config.json --start 2025-01-06 --weeks 12 --out schedule.csv
+# Weeks optional in legacy wrapper as well
+python scheduler.py --config config.json --start 2025-01 --out schedule.xlsx --format xlsx
 ```
 
 ## Configuration Schema (JSON)
@@ -100,10 +130,14 @@ Rows contain both DAY and NIGHT entries for each date.
 - `src/models.py`: data classes and constants
 - `src/config.py`: parse and validate configuration
 - `src/scheduling.py`: scheduling engine + CSV writer
+	- Also supports XLSX pivot with styling (requires `openpyxl`).
 - `src/main.py`: primary CLI entry point
 - `scheduler.py`: backward-compatible wrapper
+- `requirements.txt`: Python dependencies (install with `pip install -r requirements.txt`)
 
 ## Tips
 - Start on a Monday to align week indices.
 - If constraints are tight, the tool increases pattern length until valid (up to 24 weeks).
 - OFF days are implied by absence from DAY/NIGHT rows for a date.
+ - Google Sheets preserves XLSX styling (backgrounds, bold, frozen panes) on import.
+ - If `openpyxl` is missing, install via `pip install -r requirements.txt`.
