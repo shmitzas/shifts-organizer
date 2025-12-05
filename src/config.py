@@ -23,11 +23,20 @@ def parse_config(path: str) -> Config:
             timezone=s["timezone"],
             day_shift=TimeRange(**s["day_shift"]),
             night_shift=TimeRange(**s["night_shift"]),
-            wednesday_day_overfill_count=int(s.get("wednesday_day_overfill_count", 0)),
             min_day_staff=int(s.get("min_day_staff", inferred_min)),
             max_day_staff=int(s.get("max_day_staff", max(inferred_min, people_count))),
             min_night_staff=int(s.get("min_night_staff", inferred_min)),
             max_night_staff=int(s.get("max_night_staff", max(inferred_min, people_count))),
+            # Weekend-specific staffing
+            min_day_staff_weekend=int(s["min_day_staff_weekend"]) if "min_day_staff_weekend" in s else None,
+            max_day_staff_weekend=int(s["max_day_staff_weekend"]) if "max_day_staff_weekend" in s else None,
+            min_night_staff_weekend=int(s["min_night_staff_weekend"]) if "min_night_staff_weekend" in s else None,
+            max_night_staff_weekend=int(s["max_night_staff_weekend"]) if "max_night_staff_weekend" in s else None,
+            # Wednesday-specific staffing
+            min_day_staff_wednesday=int(s["min_day_staff_wednesday"]) if "min_day_staff_wednesday" in s else None,
+            max_day_staff_wednesday=int(s["max_day_staff_wednesday"]) if "max_day_staff_wednesday" in s else None,
+            min_night_staff_wednesday=int(s["min_night_staff_wednesday"]) if "min_night_staff_wednesday" in s else None,
+            max_night_staff_wednesday=int(s["max_night_staff_wednesday"]) if "max_night_staff_wednesday" in s else None,
         ))
     rules_raw = raw.get("rules", {})
     rules = RulesConfig(
@@ -36,7 +45,6 @@ def parse_config(path: str) -> Config:
         min_days_off=int(rules_raw.get("min_days_off", 1)),
         no_day_after_night=bool(rules_raw.get("no_day_after_night", True)),
         friday_shift2_priority_names=list(rules_raw.get("friday_shift2_priority_names", [])),
-        wednesday_day_overfill=bool(rules_raw.get("wednesday_day_overfill", True)),
         min_days_off_after_night_streak=int(rules_raw.get("min_days_off_after_night_streak", 0)),
         target_weekly_hours_min=int(rules_raw.get("target_weekly_hours_min", 40)),
         target_weekly_hours_max=int(rules_raw.get("target_weekly_hours_max", 48)),
@@ -56,8 +64,6 @@ def validate_config(cfg: Config) -> None:
     for s in cfg.shifts:
         if not s.people:
             raise ValueError(f"Shift '{s.name}' must have at least one person")
-        if s.wednesday_day_overfill_count < 0:
-            raise ValueError(f"Shift '{s.name}' wednesday_day_overfill_count must be >= 0")
         _validate_time(s.day_shift.start)
         _validate_time(s.day_shift.end)
         _validate_time(s.night_shift.start)

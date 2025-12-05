@@ -21,12 +21,21 @@ class ShiftConfig:
     timezone: str
     day_shift: TimeRange
     night_shift: TimeRange
-    wednesday_day_overfill_count: int
-    # Staffing bounds
+    # Staffing bounds for regular days
     min_day_staff: int
     max_day_staff: int
     min_night_staff: int
     max_night_staff: int
+    # Weekend-specific staffing (Saturday & Sunday)
+    min_day_staff_weekend: Optional[int] = None
+    max_day_staff_weekend: Optional[int] = None
+    min_night_staff_weekend: Optional[int] = None
+    max_night_staff_weekend: Optional[int] = None
+    # Wednesday-specific staffing
+    min_day_staff_wednesday: Optional[int] = None
+    max_day_staff_wednesday: Optional[int] = None
+    min_night_staff_wednesday: Optional[int] = None
+    max_night_staff_wednesday: Optional[int] = None
 
 @dataclasses.dataclass
 class RulesConfig:
@@ -35,7 +44,6 @@ class RulesConfig:
     min_days_off: int
     no_day_after_night: bool
     friday_shift2_priority_names: List[str]
-    wednesday_day_overfill: bool
     min_days_off_after_night_streak: int
     # New configurable targets/behaviors
     target_weekly_hours_min: int = 40
@@ -57,6 +65,7 @@ class PersonState:
     night_cooldown_remaining: int = 0
     working_streak_len: int = 0  # consecutive DAYS or NIGHTS regardless of type
     previous_assignment: Optional[str] = None  # Track previous state for transition detection
+    weekend_count: int = 0  # Track number of weekends worked
 
     def can_assign(self, assign: str, rules: RulesConfig) -> bool:
         # If in mandatory cooldown after NIGHT streak, only OFF is allowed

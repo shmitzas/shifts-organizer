@@ -61,37 +61,45 @@ def target_daily_staff_counts(shift: ShiftConfig, rules: RulesConfig, weekday_in
     """
     Decide DAY and NIGHT staffing counts using min/max bounds from ShiftConfig,
     keeping total <= available people and near the daily total heuristic.
-    Apply Wednesday day overfill (bounded by max_day_staff).
+    Apply weekend and Wednesday-specific staffing if configured.
     """
     people_count = len(shift.people)
     total_staff = _total_daily_staff(people_count, rules)
+    
+    is_weekend = (weekday_index >= 5)  # Saturday or Sunday
+    is_wednesday = (weekday_index == 2)
+
+    # Determine min/max based on day type
+    if is_weekend:
+        min_day = shift.min_day_staff_weekend if shift.min_day_staff_weekend is not None else shift.min_day_staff
+        max_day = shift.max_day_staff_weekend if shift.max_day_staff_weekend is not None else shift.max_day_staff
+        min_night = shift.min_night_staff_weekend if shift.min_night_staff_weekend is not None else shift.min_night_staff
+        max_night = shift.max_night_staff_weekend if shift.max_night_staff_weekend is not None else shift.max_night_staff
+    elif is_wednesday:
+        min_day = shift.min_day_staff_wednesday if shift.min_day_staff_wednesday is not None else shift.min_day_staff
+        max_day = shift.max_day_staff_wednesday if shift.max_day_staff_wednesday is not None else shift.max_day_staff
+        min_night = shift.min_night_staff_wednesday if shift.min_night_staff_wednesday is not None else shift.min_night_staff
+        max_night = shift.max_night_staff_wednesday if shift.max_night_staff_wednesday is not None else shift.max_night_staff
+    else:
+        min_day = shift.min_day_staff
+        max_day = shift.max_day_staff
+        min_night = shift.min_night_staff
+        max_night = shift.max_night_staff
 
     # Start from mins
-    day_count = shift.min_day_staff
-    night_count = shift.min_night_staff
+    day_count = min_day
+    night_count = min_night
 
     # Allocate remaining capacity up to maxes, preferring balance
-    # Allocate remaining capacity up to max bounds; since total_staff==people_count,
-    # this favors fuller daily staffing to increase weekly hours
     remaining = max(0, total_staff - (day_count + night_count))
-    while remaining > 0 and (day_count < shift.max_day_staff or night_count < shift.max_night_staff):
-        if day_count <= night_count and day_count < shift.max_day_staff:
+    while remaining > 0 and (day_count < max_day or night_count < max_night):
+        if day_count <= night_count and day_count < max_day:
             day_count += 1
-        elif night_count < shift.max_night_staff:
+        elif night_count < max_night:
             night_count += 1
         remaining -= 1
 
-    # Wednesday day overfill: only move from night if we have capacity and won't violate minimums
-    if (rules.wednesday_day_overfill and weekday_index == 2 and 
-        shift.wednesday_day_overfill_count > day_count):
-        desired_day = min(shift.wednesday_day_overfill_count, shift.max_day_staff)
-        # Only move from night if we can maintain night minimums
-        available_to_move = max(0, night_count - shift.min_night_staff)
-        move = min(desired_day - day_count, available_to_move)
-        day_count += move
-        night_count -= move
-
-    # Ensure total doesn’t exceed available people
+    # Ensure total doesn't exceed available people
     total = day_count + night_count
     # Safeguard: ensure at least one person scheduled (not all OFF)
     if total == 0 and people_count > 0:
@@ -113,7 +121,9 @@ def target_daily_staff_counts(shift: ShiftConfig, rules: RulesConfig, weekday_in
     return day_count, night_count
 
 
-def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks: int) -> List[WeekPlan]:
+def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks: int, 
+                         global_pattern_hours: Dict[str, float] = None,
+                         global_weekend_counts: Dict[str, int] = None) -> List[WeekPlan]:
     # If infeasible under current optional prefs, relax them
     if not _is_feasible(shift, rules):
         shift, rules = _relax_optional_prefs(shift, rules)
@@ -125,8 +135,23 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
     day_hours = _hours_for_range(shift.day_shift)
     night_hours = _hours_for_range(shift.night_shift)
     
-    # Track total hours across all weeks in the pattern for average calculation
-    pattern_total_hours: Dict[str, float] = {p: 0.0 for p in people}
+    # Use global tracking if provided, otherwise local
+    if global_pattern_hours is None:
+        pattern_total_hours: Dict[str, float] = {p: 0.0 for p in people}
+    else:
+        pattern_total_hours = global_pattern_hours
+        # Initialize this shift's people if not already in global tracker
+        for p in people:
+            if p not in pattern_total_hours:
+                pattern_total_hours[p] = 0.0
+    
+    if global_weekend_counts is None:
+        weekend_counts: Dict[str, int] = {p: 0 for p in people}
+    else:
+        weekend_counts = global_weekend_counts
+        for p in people:
+            if p not in weekend_counts:
+                weekend_counts[p] = 0
 
     for w in range(pattern_weeks):
         days: List[DayPlan] = []
@@ -172,16 +197,20 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                 return [p for p, _ in scored]
 
             day_members: List[str] = rank_candidates(DAY)[:day_count]
+            is_weekend = (d >= 5)  # Saturday or Sunday
             for p in day_members:
                 person_states[p].apply(DAY, rules)
                 # accumulate hours for fairness
                 week_hours[p] += day_hours
                 pattern_total_hours[p] += day_hours
+                if is_weekend:
+                    weekend_counts[p] += 1
 
             night_candidates = [p for p in people if p not in day_members]
 
             def rank_night(cands: List[str]) -> List[str]:
                 scored: List[Tuple[str, float]] = []
+                is_weekend = (d >= 5)  # Saturday or Sunday
                 for p in cands:
                     st = person_states[p]
                     if not st.can_assign(NIGHT, rules):
@@ -194,12 +223,14 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                     
                     # When require_equal_hours is enabled, make pattern hours the PRIMARY criteria
                     if hasattr(rules, 'require_equal_hours') and rules.require_equal_hours:
-                        # Sort primarily by pattern hours, then by streak
-                        scored.append((p, (pattern_total_hours[p], st.streak_len if st.streak_type == NIGHT else 0)))
+                        # Sort by: 1) pattern hours, 2) weekend count (fewer is better), 3) streak
+                        weekend_penalty = weekend_counts[p] * 0.1 if is_weekend else 0
+                        scored.append((p, (pattern_total_hours[p], weekend_penalty, st.streak_len if st.streak_type == NIGHT else 0)))
                     else:
                         penalty = st.streak_len if st.streak_type == NIGHT else 0
                         fairness = pattern_total_hours[p] / 10.0
-                        scored.append((p, penalty + (0 if st.last_assignment != NIGHT else 0.5) + fairness))
+                        weekend_penalty = weekend_counts[p] * 0.5 if is_weekend else 0
+                        scored.append((p, penalty + (0 if st.last_assignment != NIGHT else 0.5) + fairness + weekend_penalty))
                 scored.sort(key=lambda x: (x[1], x[0]))
                 return [p for p, _ in scored]
 
@@ -208,6 +239,8 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                 person_states[p].apply(NIGHT, rules)
                 week_hours[p] += night_hours
                 pattern_total_hours[p] += night_hours
+                if is_weekend:
+                    weekend_counts[p] += 1
 
             # Helper to try assign OFF people to a type up to a needed count
             def _assign_from_off(assign_type: str, needed: int) -> int:
@@ -242,6 +275,8 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                             night_members.append(p)
                             week_hours[p] += night_hours
                             pattern_total_hours[p] += night_hours
+                        if is_weekend:
+                            weekend_counts[p] += 1
                         needed -= 1
                 return needed
 
