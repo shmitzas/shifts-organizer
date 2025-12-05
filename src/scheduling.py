@@ -124,6 +124,9 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
     # Compute hours using the shared helper function
     day_hours = _hours_for_range(shift.day_shift)
     night_hours = _hours_for_range(shift.night_shift)
+    
+    # Track total hours across all weeks in the pattern for average calculation
+    pattern_total_hours: Dict[str, float] = {p: 0.0 for p in people}
 
     for w in range(pattern_weeks):
         days: List[DayPlan] = []
@@ -143,18 +146,28 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                     st = person_states[p]
                     if not st.can_assign(assign_type, rules):
                         continue
-                    # Respect weekly max hours cap: skip if adding today would exceed max
+                    # Respect pattern average max hours cap: check if adding today would exceed average
                     if assign_type == DAY and hasattr(rules, "target_weekly_hours_max"):
-                        if week_hours[p] + day_hours > float(rules.target_weekly_hours_max):
+                        projected_total = pattern_total_hours[p] + day_hours
+                        projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                        if projected_avg > float(rules.target_weekly_hours_max):
                             continue
                     if assign_type == NIGHT and hasattr(rules, "target_weekly_hours_max"):
-                        if week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
+                        projected_total = pattern_total_hours[p] + night_hours
+                        projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                        if projected_avg > float(rules.target_weekly_hours_max):
                             continue
-                    penalty = st.streak_len if st.streak_type == assign_type else 0
-                    bonus = -2 if (is_friday and p in priority_names) else 0
-                    # Fairness: prefer those with fewer hours so far this week
-                    fairness = week_hours[p] / 10.0  # normalize to keep impact modest
-                    scored.append((p, penalty + (0 if st.last_assignment != assign_type else 0.5) - bonus + fairness))
+                    
+                    # When require_equal_hours is enabled, make pattern hours the PRIMARY criteria
+                    if hasattr(rules, 'require_equal_hours') and rules.require_equal_hours:
+                        # Sort primarily by pattern hours, then by other factors
+                        scored.append((p, (pattern_total_hours[p], st.streak_len if st.streak_type == assign_type else 0)))
+                    else:
+                        penalty = st.streak_len if st.streak_type == assign_type else 0
+                        bonus = -2 if (is_friday and p in priority_names) else 0
+                        # Fairness: prefer those with fewer total pattern hours to equalize workload
+                        fairness = pattern_total_hours[p] / 10.0
+                        scored.append((p, penalty + (0 if st.last_assignment != assign_type else 0.5) - bonus + fairness))
                 scored.sort(key=lambda x: (x[1], x[0]))
                 return [p for p, _ in scored]
 
@@ -163,6 +176,7 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                 person_states[p].apply(DAY, rules)
                 # accumulate hours for fairness
                 week_hours[p] += day_hours
+                pattern_total_hours[p] += day_hours
 
             night_candidates = [p for p in people if p not in day_members]
 
@@ -172,11 +186,20 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                     st = person_states[p]
                     if not st.can_assign(NIGHT, rules):
                         continue
-                    if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
-                        continue
-                    penalty = st.streak_len if st.streak_type == NIGHT else 0
-                    fairness = week_hours[p] / 10.0
-                    scored.append((p, penalty + (0 if st.last_assignment != NIGHT else 0.5) + fairness))
+                    if hasattr(rules, "target_weekly_hours_max"):
+                        projected_total = pattern_total_hours[p] + night_hours
+                        projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                        if projected_avg > float(rules.target_weekly_hours_max):
+                            continue
+                    
+                    # When require_equal_hours is enabled, make pattern hours the PRIMARY criteria
+                    if hasattr(rules, 'require_equal_hours') and rules.require_equal_hours:
+                        # Sort primarily by pattern hours, then by streak
+                        scored.append((p, (pattern_total_hours[p], st.streak_len if st.streak_type == NIGHT else 0)))
+                    else:
+                        penalty = st.streak_len if st.streak_type == NIGHT else 0
+                        fairness = pattern_total_hours[p] / 10.0
+                        scored.append((p, penalty + (0 if st.last_assignment != NIGHT else 0.5) + fairness))
                 scored.sort(key=lambda x: (x[1], x[0]))
                 return [p for p, _ in scored]
 
@@ -184,27 +207,41 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
             for p in night_members:
                 person_states[p].apply(NIGHT, rules)
                 week_hours[p] += night_hours
+                pattern_total_hours[p] += night_hours
 
             # Helper to try assign OFF people to a type up to a needed count
             def _assign_from_off(assign_type: str, needed: int) -> int:
                 off_pool = [x for x in people if x not in day_members and x not in night_members]
+                
+                # When require_equal_hours is enabled, sort by pattern hours to prioritize those with fewer hours
+                if hasattr(rules, 'require_equal_hours') and rules.require_equal_hours:
+                    off_pool.sort(key=lambda p: pattern_total_hours[p])
+                
                 for p in off_pool:
                     if needed <= 0:
                         break
                     st = person_states[p]
                     if st.can_assign(assign_type, rules):
-                        # Respect max-hours cap when backfilling
-                        if assign_type == DAY and hasattr(rules, "target_weekly_hours_max") and week_hours[p] + day_hours > float(rules.target_weekly_hours_max):
-                            continue
-                        if assign_type == NIGHT and hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
-                            continue
+                        # Respect pattern average max-hours cap when backfilling
+                        if assign_type == DAY and hasattr(rules, "target_weekly_hours_max"):
+                            projected_total = pattern_total_hours[p] + day_hours
+                            projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                            if projected_avg > float(rules.target_weekly_hours_max):
+                                continue
+                        if assign_type == NIGHT and hasattr(rules, "target_weekly_hours_max"):
+                            projected_total = pattern_total_hours[p] + night_hours
+                            projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                            if projected_avg > float(rules.target_weekly_hours_max):
+                                continue
                         person_states[p].apply(assign_type, rules)
                         if assign_type == DAY:
                             day_members.append(p)
                             week_hours[p] += day_hours
+                            pattern_total_hours[p] += day_hours
                         else:
                             night_members.append(p)
                             week_hours[p] += night_hours
+                            pattern_total_hours[p] += night_hours
                         needed -= 1
                 return needed
 
@@ -216,6 +253,9 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                 # If still short, try moving from DAY if above min_day_staff
                 if needed > 0:
                     movable = [p for p in day_members if len(day_members) > shift.min_day_staff]
+                    # When require_equal_hours, prioritize moving people with MORE hours
+                    if hasattr(rules, 'require_equal_hours') and rules.require_equal_hours:
+                        movable.sort(key=lambda p: pattern_total_hours[p], reverse=True)
                     for p in movable:
                         if needed <= 0:
                             break
@@ -223,14 +263,19 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                         # Revert DAY and apply NIGHT if allowed
                         # Simple approach: if can assign NIGHT, switch
                         if st.can_assign(NIGHT, rules):
-                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
-                                continue
+                            # Check pattern average (person already has DAY hours assigned)
+                            if hasattr(rules, "target_weekly_hours_max"):
+                                projected_total = pattern_total_hours[p] - day_hours + night_hours
+                                projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                                if projected_avg > float(rules.target_weekly_hours_max):
+                                    continue
                             # Remove DAY assignment effect by resetting last assignment; re-applying below
                             # For simplicity, we won't undo streak counters here; instead prefer future assignment fairness
                             day_members.remove(p)
                             person_states[p].apply(NIGHT, rules)
                             night_members.append(p)
-                            week_hours[p] += night_hours
+                            week_hours[p] = week_hours[p] - day_hours + night_hours
+                            pattern_total_hours[p] = pattern_total_hours[p] - day_hours + night_hours
                             needed -= 1
 
             # Ensure daily minimums: fill up to min_day_staff and min_night_staff
@@ -241,23 +286,35 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                 if needed_n > 0:
                     # Move from DAY if possible
                     movable = [p for p in day_members if len(day_members) > shift.min_day_staff]
+                    # When require_equal_hours, prioritize moving people with MORE hours
+                    if hasattr(rules, 'require_equal_hours') and rules.require_equal_hours:
+                        movable.sort(key=lambda p: pattern_total_hours[p], reverse=True)
                     for p in movable:
                         if needed_n <= 0:
                             break
                         st = person_states[p]
                         if st.can_assign(NIGHT, rules):
-                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
-                                continue
+                            # Check pattern average (person already has DAY hours assigned)
+                            if hasattr(rules, "target_weekly_hours_max"):
+                                projected_total = pattern_total_hours[p] - day_hours + night_hours
+                                projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                                if projected_avg > float(rules.target_weekly_hours_max):
+                                    continue
                             day_members.remove(p)
                             person_states[p].apply(NIGHT, rules)
                             night_members.append(p)
-                            week_hours[p] += night_hours
+                            week_hours[p] = week_hours[p] - day_hours + night_hours
+                            pattern_total_hours[p] = pattern_total_hours[p] - day_hours + night_hours
                             needed_n -= 1
                 if needed_n > 0:
-                    # Debug: show why we can't meet minimum
-                    eligible_count = sum(1 for p in people if person_states[p].can_assign(NIGHT, rules))
+                    # Debug: show why we can't meet minimum with detailed breakdown
+                    eligible_no_constraints = sum(1 for p in people if person_states[p].can_assign(NIGHT, rules))
                     in_cooldown = sum(1 for p in people if person_states[p].night_cooldown_remaining > 0)
-                    print(f"WARNING {WEEKDAYS[d]}: Cannot meet min_night_staff={shift.min_night_staff} (short by {needed_n}). Eligible: {eligible_count}, In cooldown: {in_cooldown}")
+                    already_day = len(day_members)
+                    would_exceed_hours = sum(1 for p in people if p not in day_members and person_states[p].can_assign(NIGHT, rules) and hasattr(rules, "target_weekly_hours_max") and (pattern_total_hours[p] + night_hours) / pattern_weeks > float(rules.target_weekly_hours_max))
+                    print(f"WARNING {WEEKDAYS[d]}: Cannot meet min_night_staff={shift.min_night_staff} (short by {needed_n}).")
+                    print(f"  Already on DAY: {already_day}, In cooldown: {in_cooldown}, Would exceed max hours: {would_exceed_hours}")
+                    print(f"  Available OFF people: {len([p for p in people if p not in day_members and p not in night_members])}")
                     # Continue with what we have rather than failing
                     # This allows the pattern to complete even if some days are understaffed
 
@@ -268,17 +325,25 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                 if needed_d > 0:
                     # Move from NIGHT if possible
                     movable = [p for p in night_members if len(night_members) > shift.min_night_staff]
+                    # When require_equal_hours, prioritize moving people with MORE hours
+                    if hasattr(rules, 'require_equal_hours') and rules.require_equal_hours:
+                        movable.sort(key=lambda p: pattern_total_hours[p], reverse=True)
                     for p in movable:
                         if needed_d <= 0:
                             break
                         st = person_states[p]
                         if st.can_assign(DAY, rules):
-                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + day_hours > float(rules.target_weekly_hours_max):
-                                continue
+                            # Check pattern average (person already has NIGHT hours assigned)
+                            if hasattr(rules, "target_weekly_hours_max"):
+                                projected_total = pattern_total_hours[p] - night_hours + day_hours
+                                projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                                if projected_avg > float(rules.target_weekly_hours_max):
+                                    continue
                             night_members.remove(p)
                             person_states[p].apply(DAY, rules)
                             day_members.append(p)
-                            week_hours[p] += day_hours
+                            week_hours[p] = week_hours[p] - night_hours + day_hours
+                            pattern_total_hours[p] = pattern_total_hours[p] - night_hours + day_hours
                             needed_d -= 1
                 if needed_d > 0:
                     # Could not meet minimum DAY staffing; warn but continue
@@ -298,17 +363,22 @@ def allocate_week_pattern(shift: ShiftConfig, rules: RulesConfig, pattern_weeks:
                         off_members.remove(p)
                         fallback_assigned = True
                         week_hours[p] += day_hours
+                        pattern_total_hours[p] += day_hours
                         break
                 if not fallback_assigned:
                     for p in off_members:
                         st = person_states[p]
                         if st.can_assign(NIGHT, rules):
-                            if hasattr(rules, "target_weekly_hours_max") and week_hours[p] + night_hours > float(rules.target_weekly_hours_max):
-                                continue
+                            if hasattr(rules, "target_weekly_hours_max"):
+                                projected_total = pattern_total_hours[p] + night_hours
+                                projected_avg = projected_total / pattern_weeks if pattern_weeks > 0 else 0
+                                if projected_avg > float(rules.target_weekly_hours_max):
+                                    continue
                             person_states[p].apply(NIGHT, rules)
                             night_members.append(p)
                             off_members.remove(p)
                             week_hours[p] += night_hours
+                            pattern_total_hours[p] += night_hours
                             break
             # Apply OFF assignment (cooldown is now handled automatically in PersonState.apply)
             for p in off_members:
@@ -365,6 +435,29 @@ def _compute_avg_week_hours(pattern: List[WeekPlan], shift: ShiftConfig) -> Dict
                 totals[p] += night_h
     return {p: (totals[p] / max(weeks, 1)) for p in shift.people}
 
+def _check_equal_hours(pattern: List[WeekPlan], shift: ShiftConfig, rules: RulesConfig) -> bool:
+    """Check if all people have equal average hours (within 0.5 hour tolerance)"""
+    if not hasattr(rules, 'require_equal_hours') or not rules.require_equal_hours:
+        return True
+    
+    avg_hours = _compute_avg_week_hours(pattern, shift)
+    if not avg_hours:
+        return True
+    
+    hours_values = list(avg_hours.values())
+    min_hours = min(hours_values)
+    max_hours = max(hours_values)
+    
+    # Allow 0.5 hour tolerance for rounding
+    if max_hours - min_hours > 0.5:
+        print(f"Hours not equal for '{shift.name}': min={min_hours:.2f}, max={max_hours:.2f}")
+        for p, h in avg_hours.items():
+            print(f"  {p}: {h:.2f}h/week")
+        print(f"Trying a longer pattern to achieve equal hours...")
+        return False
+    
+    return True
+
 def _hours_for_range(tr: TimeRange) -> float:
     h1, m1 = map(int, tr.start.split(":"))
     h2, m2 = map(int, tr.end.split(":"))
@@ -381,7 +474,7 @@ def find_smallest_valid_pattern(shift: ShiftConfig, rules: RulesConfig, max_try_
     for w in range(start, max_try_weeks + 1):
         try:
             pat = allocate_week_pattern(shift, rules, w)
-            if _pattern_meets_mins(pat, shift):
+            if _pattern_meets_mins(pat, shift) and _check_equal_hours(pat, shift, rules):
                 return pat
             else:
                 # Try longer cycle
@@ -409,6 +502,8 @@ def find_smallest_valid_pattern(shift: ShiftConfig, rules: RulesConfig, max_try_
             try:
                 pat = allocate_week_pattern(shift, adj_rules, w)
                 if not _pattern_meets_mins(pat, shift):
+                    continue
+                if not _check_equal_hours(pat, shift, rules):
                     continue
                 avg_hours = _compute_avg_week_hours(pat, shift)
                 # Accept if average >= configurable target
@@ -565,6 +660,7 @@ def write_pivot_xlsx(out_path: str, total_weeks: int, shift_patterns: Dict[str, 
     try:
         from openpyxl import Workbook
         from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
     except Exception as e:
         raise RuntimeError("XLSX output requires 'openpyxl'. Please install it.") from e
 
@@ -778,6 +874,7 @@ def write_pivot_xlsx(out_path: str, total_weeks: int, shift_patterns: Dict[str, 
     ws.column_dimensions["A"].width = 40
     # Data columns (B..): narrow but readable
     for c in range(2, 2 + len(week_headers)):
-        ws.column_dimensions[chr(64 + c)].width = 10 if c <= 26 else 10  # simplistic; wide sheets may exceed Z
+        col_letter = get_column_letter(c)
+        ws.column_dimensions[col_letter].width = 10
 
     wb.save(out_path)

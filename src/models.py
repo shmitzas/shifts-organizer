@@ -41,6 +41,7 @@ class RulesConfig:
     target_weekly_hours_min: int = 40
     target_weekly_hours_max: int = 48
     enable_auto_adjust: bool = True
+    require_equal_hours: bool = False  # Require all people to work exactly the same average hours
 
 @dataclasses.dataclass
 class Config:
@@ -64,6 +65,13 @@ class PersonState:
         # Unified max consecutive working shifts (DAY or NIGHT)
         if assign in (DAY, NIGHT):
             if self.working_streak_len >= rules.max_shifts_in_row:
+                return False
+            # If currently on OFF streak, check if we've met minimum days off requirement
+            if self.streak_type == OFF and self.streak_len < rules.min_days_off:
+                return False
+        # Check max_days_off: if already OFF for too long, must work
+        if assign == OFF:
+            if self.streak_type == OFF and self.streak_len >= rules.max_days_off:
                 return False
         # Cross-type immediate constraints
         if assign == DAY and rules.no_day_after_night and self.last_assignment == NIGHT:

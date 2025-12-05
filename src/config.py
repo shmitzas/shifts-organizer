@@ -41,6 +41,7 @@ def parse_config(path: str) -> Config:
         target_weekly_hours_min=int(rules_raw.get("target_weekly_hours_min", 40)),
         target_weekly_hours_max=int(rules_raw.get("target_weekly_hours_max", 48)),
         enable_auto_adjust=bool(rules_raw.get("enable_auto_adjust", True)),
+        require_equal_hours=bool(rules_raw.get("require_equal_hours", False)),
     )
 
     cfg = Config(shifts=shifts, rules=rules)

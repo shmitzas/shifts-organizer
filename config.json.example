@@ -35,6 +35,7 @@
     "min_days_off_after_night_streak": 2,
     "target_weekly_hours_min": 40,
     "target_weekly_hours_max": 48,
-    "enable_auto_adjust": true
+    "enable_auto_adjust": true,
+    "require_equal_hours": false
   }
 }
