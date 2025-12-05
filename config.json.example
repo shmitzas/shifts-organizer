@@ -7,22 +7,22 @@
       "day_shift": {"start": "09:00", "end": "18:00"},
       "night_shift": {"start": "17:00", "end": "02:00"},
       "wednesday_day_overfill_count": 2,
-      "min_day_staff": 2,
-      "max_day_staff": 3,
+      "min_day_staff": 1,
+      "max_day_staff": 2,
       "min_night_staff": 2,
-      "max_night_staff": 3
+      "max_night_staff": 2
     },
     {
       "name": "Shift 2",
-      "people": ["Dina", "Evan"],
+      "people": ["Dina", "Evan", "Frank"],
       "timezone": "GMT+7",
-      "day_shift": {"start": "09:00", "end": "18:00"},
+      "day_shift": {"start": "06:00", "end": "15:00"},
       "night_shift": {"start": "17:00", "end": "02:00"},
       "wednesday_day_overfill_count": 2,
-      "min_day_staff": 2,
-      "max_day_staff": 3,
+      "min_day_staff": 1,
+      "max_day_staff": 2,
       "min_night_staff": 2,
-      "max_night_staff": 3
+      "max_night_staff": 2
     }
   ],
   "rules": {
@@ -32,9 +32,9 @@
     "no_day_after_night": true,
     "friday_shift2_priority_names": ["Dina"],
     "wednesday_day_overfill": true,
-    "min_days_off_after_night_streak": 2,
-    "target_weekly_hours_min": 40,
-    "target_weekly_hours_max": 48,
+    "min_days_off_after_night_streak": 1,
+    "target_weekly_hours_min": 35,
+    "target_weekly_hours_max": 45,
     "enable_auto_adjust": true,
     "require_equal_hours": false
   }
